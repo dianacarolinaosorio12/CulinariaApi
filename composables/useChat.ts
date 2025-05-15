@@ -1,68 +1,98 @@
 import { ref } from "vue"; // Importa la función 'ref' de Vue para crear referencias reactivas
 
+// Definimos el tipo para los mensajes del historial que espera la API de Gemini
+// Esto debe coincidir con lo que el backend espera para `history`
+interface GeminiMessagePart {
+  text: string;
+}
+interface GeminiHistoryMessage {
+  role: "user" | "model"; // Gemini usa 'user' y 'model'
+  parts: GeminiMessagePart[];
+}
+
 export function useChat() {
-  // Crea una referencia reactiva para almacenar los mensajes
-  const messages = ref<{ role: string; content: string }[]>([]);
-  // Crea una referencia reactiva para indicar si se está cargando
+  // `messages` ahora almacenará el historial en el formato que espera Gemini para el envío
+  // y también se usará para renderizar. Adaptaremos `role: "ai"` a `role: "model"` para consistencia.
+  const messages = ref<GeminiHistoryMessage[]>([]);
   const loading = ref(false);
-  // Crea una referencia reactiva para almacenar errores, inicializada como nula
   const error = ref<string | null>(null);
 
-  async function sendMessage(userMessage: string) {
-    // Limpia errores previos
+  async function sendMessage(userMessageText: string) {
     error.value = null;
 
-    // Añade el mensaje del usuario inmediatamente a la lista de mensajes
-    messages.value.push({ role: "user", content: userMessage });
-    // Indica que se está cargando
+    // Añade el mensaje del usuario al historial local en el formato de Gemini
+    const userMessageForHistory: GeminiHistoryMessage = {
+      role: "user",
+      parts: [{ text: userMessageText }],
+    };
+    messages.value.push(userMessageForHistory);
+
     loading.value = true;
 
+    // Prepara el historial para enviar al backend.
+    // No incluimos el último mensaje del usuario porque se envía por separado como 'message'.
+    // El backend espera el historial *antes* del mensaje actual.
+    // Si messages.value solo tiene el mensaje actual del usuario, historyForApi será un array vacío.
+    const historyForApi = messages.value.slice(0, -1);
+
     try {
-      // Llama a TU PROPIO endpoint de API del servidor Nuxt
       const response = await $fetch<{ reply: string }>("/api/chat", {
-        method: "POST", // Especifica el método HTTP como POST
+        method: "POST",
         headers: {
-          "Content-Type": "application/json", // Establece el tipo de contenido a JSON
+          "Content-Type": "application/json",
         },
-        // Envía el mensaje en el cuerpo, asegurándote que la clave coincida
-        // con lo que espera readBody(event) en el servidor (ej: 'message')
-        body: JSON.stringify({ message: userMessage }), // Convierte el mensaje del usuario a JSON
+        body: JSON.stringify({
+          message: userMessageText, // El mensaje actual del usuario
+          history: historyForApi,    // El historial de la conversación anterior
+        }),
       });
 
-      // Añade la respuesta recibida de tu API
       if (response && response.reply) {
-        // Si la respuesta es válida, añade la respuesta de la IA a los mensajes
-        messages.value.push({ role: "ai", content: response.reply });
-      } else {
-        // Manejo por si la respuesta no tiene el formato esperado
-        console.error("Respuesta inesperada del servidor:", response); // Registra el error en la consola
-        error.value = "Error: Respuesta inválida del servidor."; // Establece un mensaje de error
+        // Añade la respuesta de la IA al historial local en el formato de Gemini
         messages.value.push({
-          role: "ai",
-          content: "Error al recibir la respuesta.", // Añade un mensaje de error a los mensajes
+          role: "model", // Usamos 'model' para la IA, consistente con Gemini
+          parts: [{ text: response.reply }],
+        });
+      } else {
+        console.error("Respuesta inesperada del servidor:", response);
+        error.value = "Error: Respuesta inválida del servidor.";
+        messages.value.push({
+          role: "model",
+          parts: [{ text: "Error al recibir la respuesta." }],
         });
       }
     } catch (err: any) {
-      console.error("Error llamando al endpoint /api/chat:", err); // Registra el error en la consola
-      // Intenta obtener un mensaje de error más útil del objeto de error de $fetch
+      console.error("Error llamando al endpoint /api/chat:", err);
       const errorMessage =
-        err.data?.message || err.message || "Error desconocido"; // Extrae un mensaje de error útil
-      error.value = `Error al obtener respuesta: ${errorMessage}`; // Establece el mensaje de error
+        err.data?.statusMessage || // Nuxt $fetch a menudo pone el error en err.data.statusMessage
+        err.data?.message ||
+        err.message ||
+        "Error desconocido";
+      error.value = `Error al obtener respuesta: ${errorMessage}`;
       messages.value.push({
-        role: "ai",
-        content: `Lo siento, ocurrió un error (${errorMessage}). Por favor, inténtalo de nuevo.`, // Añade un mensaje de error a los mensajes
+        role: "model",
+        parts: [
+          {
+            text: `Lo siento, ocurrió un error (${errorMessage}). Por favor, inténtalo de nuevo.`,
+          },
+        ],
       });
     } finally {
-      // Finalmente, indica que la carga ha terminado
       loading.value = false;
     }
   }
 
-  // Retorna las referencias reactivas y la función para enviar mensajes
+  // Opcional: Añadir una función para limpiar el chat si es necesario
+  function clearChat() {
+    messages.value = [];
+    error.value = null;
+  }
+
   return {
-    messages,
+    messages, // Este ahora es un array de GeminiHistoryMessage
     loading,
     error,
     sendMessage,
+    clearChat, // Opcional
   };
 }
